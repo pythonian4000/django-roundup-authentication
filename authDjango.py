@@ -5,6 +5,10 @@ from roundup.cgi.client import LiberalCookie
 from roundup.cgi.actions import LoginAction, LogoutAction
 from roundup.password import Password
 
+allowed_usernames = [
+        'sufjan'
+        ]
+
 class SessionDjango:
     """
     Needs DB to be already opened by client
@@ -66,11 +70,7 @@ class SessionDjango:
                 d_cursor.execute(sql)
             except Exception as e:
                 # Something went wrong, so abort
-                self.client.make_user_anonymous()
-                self.destroy()
-                self.client.classname = None
-                self.client.nodeid = None
-                self.client.template = None
+                self._ensure_logged_out()
                 return
             row = d_cursor.fetchone()
             if row:
@@ -116,18 +116,35 @@ class SessionDjango:
                         self._data = self.session_db.getall(self._sid)
             else:
                 # We are not logged into Django so make sure we aren't logged in here.
-                self.client.make_user_anonymous()
-                self.destroy()
-                self.client.classname = None
-                self.client.nodeid = None
-                self.client.template = None
+                self._ensure_logged_out()
         else:
-            # We are not logged into Django so make sure we aren't logged in here.
-            self.client.make_user_anonymous()
-            self.destroy()
-            self.client.classname = None
-            self.client.nodeid = None
-            self.client.template = None
+            # Certain users who cannot log into Django (such as bots) will be allowed
+            # to log in anyway via username and password. So do Roundup cookie checks
+            # here to see if they are one of those users.
+            if self.cookie_name in cookies:
+                if not self.session_db.exists(cookies[self.cookie_name].value):
+                    self._sid = None
+                    # remove old cookie
+                    self.client.add_cookie(self.cookie_name, None)
+                else:
+                    self._sid = cookies[self.cookie_name].value
+                    self._data = self.session_db.getall(self._sid)
+                username = self.get('user')
+                if username not in allowed_usernames:
+                    # We are not logged into Django and not allowed here via username login.
+                    # So make sure we aren't logged in here.
+                    self._ensure_logged_out()
+            else:
+                # We are not logged into Django and not allowed here via username login.
+                # So make sure we aren't logged in here.
+                self._ensure_logged_out()
+
+    def _ensure_logged_out(self):
+        self.client.make_user_anonymous()
+        self.destroy()
+        self.client.classname = None
+        self.client.nodeid = None
+        self.client.template = None
 
     def _gen_password(self, length=12, chars=string.letters + string.digits):
         return Password(''.join([random.choice(chars) for i in range(length)]))
@@ -194,6 +211,15 @@ class SessionDjango:
 
 class LoginDjango(LoginAction):
     def handle(self):
+        # We only want certain users to be able to log in with a username and password.
+        # So we check for those users here.
+        if self.client.env['REQUEST_METHOD'] == 'POST':
+            if '__login_name' in self.form:
+                username = self.form['__login_name'].value
+                if username in allowed_usernames:
+                    # User is allowed to login, so continue with action as normal.
+                    LoginAction.handle(self)
+                    return
         # Redirect to the Django login page, which will login and redirect back here.
         login_url = "https://openhatch.org/account/login/?next=/bugs/"
         self.client.setHeader("Location", login_url)
